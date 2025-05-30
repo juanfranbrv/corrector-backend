@@ -12,20 +12,24 @@ SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET")
 ALGORITHM = "HS256" # Supabase usa HS256 con el JWT Secret simple
 
 if not SUPABASE_JWT_SECRET:
-    # En un entorno de producción, querrías que esto detuviera la aplicación o lanzara un error más severo.
     print("ERROR CRÍTICO: SUPABASE_JWT_SECRET no está configurado en el archivo .env. La autenticación fallará.")
-    # raise EnvironmentError("SUPABASE_JWT_SECRET no está configurado en el archivo .env") # Podrías descomentar esto
+    # En un entorno de producción, considera lanzar una excepción para detener la aplicación.
+    # raise EnvironmentError("SUPABASE_JWT_SECRET no está configurado en el archivo .env")
 
+# El tokenUrl no es estrictamente necesario aquí ya que Supabase maneja la obtención del token,
+# pero FastAPI lo requiere para la documentación OpenAPI.
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/token") # "auth/token" es un placeholder
 
 class TokenPayload(BaseModel):
     sub: str             # User ID de Supabase (Subject)
     aud: str             # Audiencia, debería ser "authenticated"
     exp: int             # Tiempo de expiración (timestamp Unix)
-    email: str | None = None # Opcional, si Supabase lo incluye y lo necesitas
-    role: str | None = None  # Opcional, el rol del usuario (ej. "authenticated")
-    # Puedes añadir otros campos que Supabase incluya en el token y necesites,
-    # como app_metadata, user_metadata, etc., si están presentes.
+    email: str | None = None # Email del usuario (Supabase lo incluye por defecto)
+    role: str | None = None  # Rol del usuario (ej. "authenticated")
+    # Puedes añadir otros campos estándar de JWT o específicos de Supabase si los necesitas:
+    # iat: int | None = None # Issued at time
+    # app_metadata: dict | None = None
+    # user_metadata: dict | None = None
 
 async def get_current_user(token: str = Depends(oauth2_scheme)) -> TokenPayload:
     """
@@ -42,29 +46,27 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> TokenPayload:
             token,
             SUPABASE_JWT_SECRET,
             algorithms=[ALGORITHM],
-            audience="authenticated"  # Validar que el token está destinado a la audiencia "authenticated"
-            # Opcionalmente, también podrías validar el emisor (issuer) si es consistente:
-            # issuer=f"https://{os.getenv('SUPABASE_PROJECT_ID')}.supabase.co/auth/v1"
-            # (esto requeriría que añadas SUPABASE_PROJECT_ID a tus variables de entorno)
+            audience="authenticated"
         )
         # Valida la estructura del payload decodificado con el modelo Pydantic
         token_data = TokenPayload(**payload_dict)
 
     except JWTError as e:
-        # Si python-jose lanza un error (token expirado, firma inválida, audiencia incorrecta, etc.)
-        print(f"Error de JWT al decodificar/validar: {e}") # Log para depuración en el servidor
+        print(f"Error de JWT al decodificar/validar: {e}")
         raise credentials_exception
     except ValidationError as e:
-        # Si el payload decodificado no coincide con la estructura de TokenPayload
-        print(f"Error de validación del payload del token: {e}") # Log para depuración
+        print(f"Error de validación del payload del token: {e}")
         raise credentials_exception
     
-    # Una verificación extra, aunque 'sub' es mandatorio en TokenPayload
     if token_data.sub is None:
+        # Esta verificación es redundante si 'sub' es un campo obligatorio en TokenPayload,
+        # pero no hace daño como una doble comprobación.
         raise credentials_exception
         
     return token_data
 
-# Dependencia de conveniencia si solo necesitas el ID del usuario
 async def get_current_user_id(current_user: TokenPayload = Depends(get_current_user)) -> str:
+    """
+    Dependencia de conveniencia que solo devuelve el ID del usuario (sub) del token.
+    """
     return current_user.sub
