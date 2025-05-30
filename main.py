@@ -2,11 +2,11 @@
 import os
 import uuid
 from datetime import datetime, timezone
-from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, status as http_status # Importar status para códigos HTTP
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, status as http_status
 from fastapi.middleware.cors import CORSMiddleware
-from sqlmodel import Session, SQLModel, create_engine, select
+from sqlmodel import Session, SQLModel, create_engine, select, func # func para count
 from dotenv import load_dotenv
-from urllib.parse import urlparse # Para extraer el path de la URL de la imagen
+from urllib.parse import urlparse
 
 from supabase import create_client, Client as SupabaseClient
 
@@ -34,6 +34,7 @@ if not os.getenv("SUPABASE_JWT_SECRET"):
     print("ADVERTENCIA: SUPABASE_JWT_SECRET no parece estar en .env. auth_utils.py podría fallar o la validación de JWT fallará.")
 
 MAX_UPLOAD_SIZE_BYTES = 5 * 1024 * 1024
+MAX_EXAM_PAPERS_PER_USER = 20 # Límite de redacciones por usuario
 
 def create_db_and_tables():
     SQLModel.metadata.create_all(engine)
@@ -63,11 +64,16 @@ def get_session():
     with Session(engine) as session:
         yield session
 
+# --- Modelo de Respuesta para /users/me ---
+class UserStatusResponse(TokenPayload): # Hereda de TokenPayload
+    current_paper_count: int
+    max_paper_quota: int
+
+
 @app.get("/")
 async def read_root():
     return {"message": "API del Corrector de Inglés lista y funcionando!"}
 
-# --- Endpoints de TestItem (Mantener o eliminar según necesidad) ---
 @app.post("/test_items/", response_model=models.TestItemRead)
 async def create_test_item(item_data: models.TestItemCreate, session: Session = Depends(get_session)):
     db_item = models.TestItem.model_validate(item_data)
@@ -89,16 +95,28 @@ async def read_test_item(item_id: int, session: Session = Depends(get_session)):
         raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail=f"TestItem with id {item_id} not found")
     return item
     
-# --- Endpoints Protegidos de Autenticación (Ejemplos) ---
-@app.get("/users/me/", response_model=TokenPayload)
-async def read_users_me(current_user: TokenPayload = Depends(get_current_user)):
-    return current_user
+# --- ENDPOINT /users/me MODIFICADO ---
+@app.get("/users/me/", response_model=UserStatusResponse)
+async def read_users_me_with_status(
+    current_user_payload: TokenPayload = Depends(get_current_user),
+    session: Session = Depends(get_session)
+):
+    user_id = current_user_payload.sub
+
+    count_statement = select(func.count(models.ExamPaper.id)).where(models.ExamPaper.user_id == user_id)
+    current_paper_count = session.exec(count_statement).one()
+
+    print(f"Info de estado para usuario {user_id}: {current_paper_count} redacciones, cuota {MAX_EXAM_PAPERS_PER_USER}")
+    return UserStatusResponse(
+        **current_user_payload.model_dump(),
+        current_paper_count=current_paper_count,
+        max_paper_quota=MAX_EXAM_PAPERS_PER_USER
+    )
 
 @app.get("/protected-route-example/")
 async def protected_route_example(user_id: str = Depends(get_current_user_id)):
     return {"message": "Ruta protegida accedida con éxito!", "user_id_from_token": user_id}
 
-# --- Endpoints para ExamPapers ---
 EXAM_IMAGES_BUCKET = "exam-images"
 
 @app.post("/exam_papers/upload_image/", response_model=models.ExamPaperRead)
@@ -109,6 +127,15 @@ async def upload_exam_image(
 ):
     user_id = current_auth_user.sub
     user_email = current_auth_user.email
+
+    count_statement = select(func.count(models.ExamPaper.id)).where(models.ExamPaper.user_id == user_id)
+    current_paper_count = session.exec(count_statement).one()
+    print(f"Usuario {user_id} tiene actualmente {current_paper_count} redacciones. Límite: {MAX_EXAM_PAPERS_PER_USER}")
+    if current_paper_count >= MAX_EXAM_PAPERS_PER_USER:
+        raise HTTPException(
+            status_code=http_status.HTTP_403_FORBIDDEN,
+            detail=f"Has alcanzado el límite máximo de {MAX_EXAM_PAPERS_PER_USER} redacciones permitidas."
+        )
 
     if not supabase_admin_client:
         raise HTTPException(status_code=http_status.HTTP_503_SERVICE_UNAVAILABLE, detail="El servicio de almacenamiento no está configurado correctamente en el servidor.")
@@ -183,63 +210,35 @@ async def list_exam_papers_for_current_user(
     print(f"Encontradas {len(exam_papers)} redacciones para el usuario {user_id}.")
     return exam_papers
 
-# --- NUEVO ENDPOINT PARA ELIMINAR UNA REDACCIÓN ---
-@app.delete("/exam_papers/{paper_id}", status_code=http_status.HTTP_200_OK) # O HTTP_204_NO_CONTENT si no devuelves cuerpo
+@app.delete("/exam_papers/{paper_id}", status_code=http_status.HTTP_200_OK)
 async def delete_exam_paper(
-    paper_id: int,
-    current_user_id: str = Depends(get_current_user_id), # Para autenticación y autorización
+    paper_id: int, current_user_id: str = Depends(get_current_user_id),
     session: Session = Depends(get_session)
 ):
     print(f"Intento de eliminación del ExamPaper ID: {paper_id} por el usuario: {current_user_id}")
-    
-    # 1. Obtener el ExamPaper de la BD
     db_exam_paper = session.get(models.ExamPaper, paper_id)
-
     if not db_exam_paper:
         raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail=f"Redacción con ID {paper_id} no encontrada.")
-
-    # 2. Verificar que el ExamPaper pertenece al usuario autenticado
     if db_exam_paper.user_id != current_user_id:
-        print(f"Acceso denegado: Usuario {current_user_id} intentó eliminar redacción {paper_id} que pertenece a {db_exam_paper.user_id}")
         raise HTTPException(status_code=http_status.HTTP_403_FORBIDDEN, detail="No tienes permiso para eliminar esta redacción.")
 
-    # 3. Eliminar el archivo de Supabase Storage (si tiene image_url)
     if db_exam_paper.image_url and supabase_admin_client and EXAM_IMAGES_BUCKET and SUPABASE_URL:
         try:
-            # Extraer el path del archivo de la image_url completa
-            # La URL es: SUPABASE_URL/storage/v1/object/public/BUCKET_NAME/PATH_ON_STORAGE
-            # Necesitamos "PATH_ON_STORAGE"
             parsed_url = urlparse(db_exam_paper.image_url)
-            # El path tendrá /storage/v1/object/public/BUCKET_NAME/path/to/file.jpg
-            # Necesitamos quitar la parte inicial hasta el nombre del bucket inclusive.
             prefix_to_remove = f"/storage/v1/object/public/{EXAM_IMAGES_BUCKET}/"
             if parsed_url.path.startswith(prefix_to_remove):
                 path_on_storage_to_delete = parsed_url.path[len(prefix_to_remove):]
                 print(f"Intentando eliminar de Supabase Storage: bucket='{EXAM_IMAGES_BUCKET}', path='{path_on_storage_to_delete}'")
-                
-                response_storage_delete = supabase_admin_client.storage.from_(EXAM_IMAGES_BUCKET).remove([path_on_storage_to_delete])
-                
-                # Aquí puedes verificar response_storage_delete si la librería devuelve algo útil
-                # Por ahora, asumimos que si no hay excepción, se eliminó o no existía.
-                print(f"Respuesta de Supabase Storage al eliminar: {response_storage_delete}")
-            else:
-                print(f"ADVERTENCIA: No se pudo extraer el path de almacenamiento de la URL: {db_exam_paper.image_url}")
-
+                supabase_admin_client.storage.from_(EXAM_IMAGES_BUCKET).remove([path_on_storage_to_delete])
+            else: print(f"ADVERTENCIA: No se pudo extraer el path de almacenamiento de la URL: {db_exam_paper.image_url}")
         except Exception as e_storage:
-            # Si falla la eliminación del storage, podríamos decidir continuar y solo borrar de la BD,
-            # o detener la operación. Por ahora, solo logueamos y continuamos.
             print(f"Error al intentar eliminar el archivo de Supabase Storage: {e_storage}. Se continuará con la eliminación del registro en BD.")
-            # Podrías añadir una lógica más robusta aquí, como marcar el paper para una limpieza posterior.
-
-    # 4. Eliminar el registro de la base de datos
     try:
         session.delete(db_exam_paper)
         session.commit()
         print(f"Redacción ID: {paper_id} eliminada de la base de datos por el usuario: {current_user_id}")
         return {"message": "Redacción eliminada exitosamente", "paper_id": paper_id}
-        # Si prefieres 204 No Content, el endpoint debería devolver None y tener status_code=204
-        # return None 
     except Exception as e_db:
-        session.rollback()
+        if session.is_active: session.rollback()
         print(f"Error al eliminar la redacción ID: {paper_id} de la BD: {e_db}")
         raise HTTPException(status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error al eliminar la redacción de la base de datos.")
