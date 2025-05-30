@@ -35,6 +35,7 @@ if not os.getenv("SUPABASE_JWT_SECRET"):
 
 MAX_UPLOAD_SIZE_BYTES = 5 * 1024 * 1024
 MAX_EXAM_PAPERS_PER_USER = 20 # Límite de redacciones por usuario
+TRANSCRIPTION_COST = 1 # Por ejemplo, 1 crédito por transcripción
 
 def create_db_and_tables():
     SQLModel.metadata.create_all(engine)
