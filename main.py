@@ -14,6 +14,9 @@ from auth_utils import get_current_user, get_current_user_id, TokenPayload
 import models
 import llm_services # Importar nuestro nuevo módulo de servicios LLM
 
+
+
+
 load_dotenv()
 
 # --- Configuración de Base de Datos ---
@@ -21,7 +24,8 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     print("ERROR CRÍTICO: DATABASE_URL no está configurada. La aplicación no funcionará.")
     exit()
-engine = create_engine(DATABASE_URL, echo=True)
+
+engine = create_engine(DATABASE_URL, echo=True, pool_pre_ping=True) # Añadido pool_pre_ping
 
 # --- Configuración del Cliente de Supabase (para Storage y otras interacciones de backend) ---
 SUPABASE_URL = os.getenv("SUPABASE_URL")
