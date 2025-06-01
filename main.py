@@ -62,7 +62,13 @@ app = FastAPI(
 )
 
 # --- Configuración de CORS ---
-origins = ["http://localhost:3000"]
+origins = [
+    "http://localhost:3000",  # Para desarrollo local
+    "https://tu-proyecto-frontend.vercel.app", 
+    "https://corrector-frontend-git-main-juanfranbrvs-projects.vercel.app/" # TU URL DE VERCEL AQUÍ
+    # Si Vercel te da otros dominios de vista previa que quieras probar, añádelos también.
+]
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
