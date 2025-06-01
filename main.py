@@ -64,9 +64,9 @@ app = FastAPI(
 # --- Configuración de CORS ---
 origins = [
     "http://localhost:3000",  # Para desarrollo local
-    "https://corrector-frontend.vercel.app/", 
-    "https://corrector-frontend-git-main-juanfranbrvs-projects.vercel.app/" # TU URL DE VERCEL AQUÍ
-    # Si Vercel te da otros dominios de vista previa que quieras probar, añádelos también.
+    "https://corrector-frontend.vercel.app", # Sin barra final
+    "https://corrector-frontend-git-main-juanfranbrvs-projects.vercel.app", # Sin barra final
+    "https://english-corrector-api.onrender.com" # URL de producción del backend
 ]
 
 app.add_middleware(
