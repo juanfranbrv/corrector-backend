@@ -7,12 +7,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import Session, SQLModel, create_engine, select, func # func para count
 from dotenv import load_dotenv
 from urllib.parse import urlparse
+from pydantic import BaseModel # Para el nuevo modelo de request
 
 from supabase import create_client, Client as SupabaseClient
 
 from auth_utils import get_current_user, get_current_user_id, TokenPayload
 import models
-import llm_services # Importar nuestro nuevo módulo de servicios LLM
+import llm_services
 
 load_dotenv()
 
@@ -42,10 +43,10 @@ if not os.getenv("OPENAI_API_KEY") and not os.getenv("GOOGLE_API_KEY"):
 
 
 # --- Constantes de la Aplicación ---
-MAX_UPLOAD_SIZE_BYTES = 5 * 1024 * 1024  # 5 MB
+MAX_UPLOAD_SIZE_BYTES = 5 * 1024 * 1024
 MAX_EXAM_PAPERS_PER_USER = 20
-TRANSCRIPTION_COST = 1 # 1 crédito por transcripción
-CORRECTION_COST = 5    # Ejemplo: 5 créditos por corrección. AJUSTA ESTE VALOR.
+TRANSCRIPTION_COST = 1
+CORRECTION_COST = 5
 EXAM_IMAGES_BUCKET = "exam-images"
 
 
@@ -87,39 +88,23 @@ def get_session():
     with Session(engine) as session:
         yield session
 
-# --- Modelo de Respuesta para /users/me ---
+# --- Modelos de Request/Response Específicos para Endpoints ---
 class UserStatusResponse(TokenPayload):
     current_paper_count: int
     max_paper_quota: int
     credits: int
+
+class TranscribedTextUpdate(BaseModel): # Usar Pydantic BaseModel es más ligero aquí
+    transcribed_text: str
 
 # --- Endpoints Públicos / de Prueba ---
 @app.get("/")
 async def read_root():
     return {"message": "API del Corrector de Inglés lista y funcionando!"}
 
-# --- Endpoints de TestItem (Mantener o eliminar según necesidad) ---
-@app.post("/test_items/", response_model=models.TestItemRead)
-async def create_test_item(item_data: models.TestItemCreate, session: Session = Depends(get_session)):
-    db_item = models.TestItem.model_validate(item_data)
-    session.add(db_item)
-    session.commit()
-    session.refresh(db_item)
-    return db_item
+# (Endpoints de TestItem omitidos por brevedad si no son relevantes ahora)
+# ...
 
-@app.get("/test_items/", response_model=list[models.TestItemRead])
-async def read_test_items(skip: int = 0, limit: int = 100, session: Session = Depends(get_session)):
-    statement = select(models.TestItem).offset(skip).limit(limit)
-    items = session.exec(statement).all()
-    return items
-
-@app.get("/test_items/{item_id}", response_model=models.TestItemRead)
-async def read_test_item(item_id: int, session: Session = Depends(get_session)):
-    item = session.get(models.TestItem, item_id)
-    if not item:
-        raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail=f"TestItem with id {item_id} not found")
-    return item
-    
 # --- Endpoints de Usuario y Autenticación ---
 @app.get("/users/me/", response_model=UserStatusResponse)
 async def read_users_me_with_status(
@@ -141,10 +126,6 @@ async def read_users_me_with_status(
         max_paper_quota=MAX_EXAM_PAPERS_PER_USER,
         credits=user_credits
     )
-
-@app.get("/protected-route-example/")
-async def protected_route_example(user_id: str = Depends(get_current_user_id)):
-    return {"message": "Ruta protegida accedida con éxito!", "user_id_from_token": user_id}
 
 # --- Endpoints para ExamPapers ---
 @app.post("/exam_papers/upload_image/", response_model=models.ExamPaperRead)
@@ -178,7 +159,6 @@ async def upload_exam_image(
         if not db_user:
             if not user_email:
                 print(f"ADVERTENCIA: Email no disponible en el token para el usuario {user_id}. Creando usuario sin email local.")
-            
             new_db_user_data = models.UserCreate(id=user_id, email=user_email, credits=0) 
             db_user = models.User.model_validate(new_db_user_data)
             session.add(db_user)
@@ -200,9 +180,7 @@ async def upload_exam_image(
         db_exam_paper_data = models.ExamPaperCreate(filename=original_filename, image_url=image_public_url, status="uploaded", user_id=user_id)
         db_exam_paper = models.ExamPaper.model_validate(db_exam_paper_data)
         session.add(db_exam_paper)
-        
         session.commit() 
-        
         if db_user: session.refresh(db_user)
         session.refresh(db_exam_paper)
         return db_exam_paper
@@ -251,12 +229,10 @@ async def delete_exam_paper(
     try:
         deleted_paper_data = models.ExamPaperRead.model_validate(db_exam_paper)
         session.delete(db_exam_paper)
-
         if path_on_storage_to_delete and supabase_admin_client:
             print(f"Intentando eliminar de Supabase Storage: {path_on_storage_to_delete}")
             supabase_admin_client.storage.from_(EXAM_IMAGES_BUCKET).remove([path_on_storage_to_delete])
             print(f"Solicitud de eliminación enviada a Supabase Storage para: {path_on_storage_to_delete}")
-        
         session.commit()
         print(f"Redacción ID: {paper_id} eliminada de la BD.")
         return deleted_paper_data
@@ -274,7 +250,6 @@ async def transcribe_exam_paper_endpoint(
 ):
     user_id = current_auth_user.sub
     print(f"Usuario {user_id} solicitando transcripción para ExamPaper ID: {paper_id}")
-
     db_exam_paper = session.get(models.ExamPaper, paper_id)
     if not db_exam_paper:
         raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail=f"Redacción con ID {paper_id} no encontrada.")
@@ -292,7 +267,6 @@ async def transcribe_exam_paper_endpoint(
         print(f"ERROR CRÍTICO: Usuario {user_id} no encontrado en tabla local 'user' durante la transcripción. Creando con 0 créditos.")
         if not current_auth_user.email:
             raise HTTPException(status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error de datos de usuario, email no encontrado. Contacte soporte.")
-        
         new_db_user_data = models.UserCreate(id=user_id, email=current_auth_user.email, credits=0)
         db_user = models.User.model_validate(new_db_user_data)
         session.add(db_user)
@@ -301,7 +275,6 @@ async def transcribe_exam_paper_endpoint(
     if db_user.credits < TRANSCRIPTION_COST:
         raise HTTPException(status_code=http_status.HTTP_402_PAYMENT_REQUIRED, detail=f"Créditos insuficientes. Necesitas {TRANSCRIPTION_COST}, tienes {db_user.credits}.")
 
-    original_status = db_exam_paper.status
     db_exam_paper.status = "transcribing"
     db_exam_paper.updated_at = datetime.now(timezone.utc)
     session.add(db_exam_paper)
@@ -311,22 +284,18 @@ async def transcribe_exam_paper_endpoint(
     transcribed_text_result: str | None = None
     transcription_successful = False
     try:
-        prompt_for_transcription = "Transcribe el texto manuscrito visible en esta imagen de la forma más precisa y completa posible."
+        # El prompt ahora se define por defecto en llm_services si no se pasa
         transcribed_text_result = await llm_services.transcribe_image_url_with_llm(
-            image_url=db_exam_paper.image_url, prompt_text=prompt_for_transcription
+            image_url=db_exam_paper.image_url
         )
         if transcribed_text_result and transcribed_text_result.strip():
             transcription_successful = True
     except Exception as e_llm:
         print(f"Error durante la llamada al LLM para transcripción (paper {paper_id}): {e_llm}")
 
-    # Segundo bloque try-except para la actualización de la base de datos
     try:
-        # Es importante refrescar el estado de los objetos de la BD desde la sesión actual
-        # antes de modificarlos, especialmente si hubo un commit o una operación larga (como la llamada al LLM).
         session.refresh(db_user) 
         session.refresh(db_exam_paper)
-
         if transcription_successful and transcribed_text_result is not None:
             db_exam_paper.transcribed_text = transcribed_text_result
             db_exam_paper.status = "transcribed"
@@ -337,25 +306,19 @@ async def transcribe_exam_paper_endpoint(
         else:
             db_exam_paper.status = "error_transcription"
             print(f"Transcripción falló o resultó vacía para paper {paper_id}. No se descontaron créditos.")
-
         db_exam_paper.updated_at = datetime.now(timezone.utc)
         session.add(db_exam_paper)
         session.commit()
         session.refresh(db_exam_paper)
         session.refresh(db_user)
-
         if not transcription_successful:
             raise HTTPException(status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error durante el proceso de transcripción con IA.")
-        
         return db_exam_paper
-        
     except Exception as e_db_update:
         if session.is_active: session.rollback()
         print(f"Error al actualizar BD después de intento de transcripción para paper {paper_id}: {e_db_update}")
-        
-        # Intentar marcar el paper como 'error_transcription' si la actualización de la BD falla
         try:
-            paper_to_recover = session.get(models.ExamPaper, paper_id) # Re-obtener de la sesión
+            paper_to_recover = session.get(models.ExamPaper, paper_id)
             if paper_to_recover and paper_to_recover.status != "error_transcription":
                 paper_to_recover.status = "error_transcription"
                 paper_to_recover.updated_at = datetime.now(timezone.utc)
@@ -363,9 +326,47 @@ async def transcribe_exam_paper_endpoint(
                 session.commit()
         except Exception as e_recovery:
             print(f"Error adicional intentando marcar paper {paper_id} como error_transcription: {e_recovery}")
-            if session.is_active: session.rollback() # Rollback del intento de recuperación si también falla
-
+            if session.is_active: session.rollback()
         raise HTTPException(status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error al guardar el resultado de la transcripción.")
+
+# NUEVO ENDPOINT para actualizar el texto transcrito
+@app.put("/exam_papers/{paper_id}/transcribed_text", response_model=models.ExamPaperRead)
+async def update_exam_paper_transcribed_text(
+    paper_id: int,
+    update_data: TranscribedTextUpdate,
+    current_user_id: str = Depends(get_current_user_id),
+    session: Session = Depends(get_session)
+):
+    print(f"Usuario {current_user_id} actualizando texto transcrito para ExamPaper ID: {paper_id}")
+    db_exam_paper = session.get(models.ExamPaper, paper_id)
+
+    if not db_exam_paper:
+        raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail=f"Redacción con ID {paper_id} no encontrada.")
+    if db_exam_paper.user_id != current_user_id:
+        raise HTTPException(status_code=http_status.HTTP_403_FORBIDDEN, detail="No tienes permiso para editar esta redacción.")
+
+    db_exam_paper.transcribed_text = update_data.transcribed_text
+    db_exam_paper.updated_at = datetime.now(timezone.utc)
+    
+    # Opcional: Considerar si se debe cambiar el estado.
+    # Si estaba en 'error_transcription' y ahora tiene texto, podría volver a 'transcribed'.
+    if db_exam_paper.status == "error_transcription" and update_data.transcribed_text and update_data.transcribed_text.strip():
+        db_exam_paper.status = "transcribed"
+        print(f"Estado de ExamPaper ID: {paper_id} cambiado a 'transcribed' después de edición manual.")
+    
+    # Si estaba 'uploaded' y se edita un texto (aunque no debería tener texto transcrito aún),
+    # se podría cambiar a 'transcribed' también.
+    elif db_exam_paper.status == "uploaded" and update_data.transcribed_text and update_data.transcribed_text.strip():
+        db_exam_paper.status = "transcribed"
+        print(f"Estado de ExamPaper ID: {paper_id} cambiado a 'transcribed' después de edición manual (era 'uploaded').")
+
+
+    session.add(db_exam_paper)
+    session.commit()
+    session.refresh(db_exam_paper)
+
+    print(f"Texto transcrito para ExamPaper ID: {paper_id} actualizado exitosamente.")
+    return db_exam_paper
 
 
 @app.post("/exam_papers/{paper_id}/correct", response_model=models.ExamPaperRead)
@@ -376,13 +377,11 @@ async def correct_exam_paper_endpoint(
 ):
     user_id = current_auth_user.sub
     print(f"Usuario {user_id} solicitando corrección para ExamPaper ID: {paper_id}")
-
     db_exam_paper = session.get(models.ExamPaper, paper_id)
     if not db_exam_paper:
         raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail=f"Redacción con ID {paper_id} no encontrada.")
     if db_exam_paper.user_id != user_id:
         raise HTTPException(status_code=http_status.HTTP_403_FORBIDDEN, detail="No tienes permiso para corregir esta redacción.")
-    
     if db_exam_paper.status != "transcribed":
         raise HTTPException(status_code=http_status.HTTP_409_CONFLICT, detail=f"Solo se pueden corregir redacciones que han sido transcritas. Estado actual: {db_exam_paper.status}")
     if not db_exam_paper.transcribed_text or not db_exam_paper.transcribed_text.strip():
@@ -414,11 +413,9 @@ async def correct_exam_paper_endpoint(
     except Exception as e_llm:
         print(f"Error durante la llamada al LLM para corrección (paper {paper_id}): {e_llm}")
 
-    # Segundo bloque try-except para la actualización de la base de datos
     try:
         session.refresh(db_user)
         session.refresh(db_exam_paper)
-
         current_time = datetime.now(timezone.utc)
         if correction_successful and correction_feedback_result is not None:
             db_exam_paper.corrected_feedback = correction_feedback_result
@@ -426,28 +423,23 @@ async def correct_exam_paper_endpoint(
             db_exam_paper.correction_credits_consumed = CORRECTION_COST
             db_exam_paper.correction_prompt_version = llm_services.CORRECTION_PROMPT_VERSION_CURRENT
             db_exam_paper.corrected_at = current_time
-            
             db_user.credits -= CORRECTION_COST
             session.add(db_user)
             print(f"Créditos descontados por corrección para usuario {user_id}. Nuevo saldo: {db_user.credits}")
         else:
             db_exam_paper.status = "error_correction"
             print(f"Corrección falló o resultó vacía para paper {paper_id}. No se descontaron créditos.")
-
-        db_exam_paper.updated_at = current_time # Actualizar updated_at independientemente del resultado
+        db_exam_paper.updated_at = current_time
         session.add(db_exam_paper)
         session.commit()
         session.refresh(db_exam_paper)
         session.refresh(db_user)
-
         if not correction_successful:
             raise HTTPException(status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error durante el proceso de corrección con IA.")
-        
         return db_exam_paper
     except Exception as e_db_update:
         if session.is_active: session.rollback()
         print(f"Error al actualizar BD después de intento de corrección para paper {paper_id}: {e_db_update}")
-
         try:
             paper_to_recover = session.get(models.ExamPaper, paper_id)
             if paper_to_recover and paper_to_recover.status != "error_correction":
@@ -458,5 +450,4 @@ async def correct_exam_paper_endpoint(
         except Exception as e_recovery:
             print(f"Error adicional intentando marcar paper {paper_id} como error_correction: {e_recovery}")
             if session.is_active: session.rollback()
-
-        raise HTTPException(status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error al guardar el resultado de la corrección. ")
+        raise HTTPException(status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error al guardar el resultado de la corrección.")
