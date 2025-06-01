@@ -459,4 +459,4 @@ async def correct_exam_paper_endpoint(
             print(f"Error adicional intentando marcar paper {paper_id} como error_correction: {e_recovery}")
             if session.is_active: session.rollback()
 
-        raise HTTPException(status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error al guardar el resultado de la corrección.")
+        raise HTTPException(status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error al guardar el resultado de la corrección. ")
