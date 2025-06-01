@@ -74,15 +74,18 @@ async def transcribe_image_url_with_llm(image_url: str, prompt_text: str | None 
     Toma una URL de imagen y un prompt, y usa el LLM de visión configurado
     para obtener una transcripción o descripción.
     El LLM NO debe corregir errores gramaticales o de ortografía, solo transcribir.
+    La transcripción DEBE estar en el mismo idioma que el texto manuscrito (asumido inglés).
     """
     llm = get_vision_model_client()
 
-    # Nuevo prompt por defecto más explícito si no se proporciona uno
     if prompt_text is None:
         prompt_text = (
-            "Transcribe el texto manuscrito visible en esta imagen de la forma más precisa y literal posible. "
+            "Transcribe el texto manuscrito visible en esta imagen. "
+            "**La transcripción debe estar en el mismo idioma que el texto original en la imagen (se asume que es inglés).** "
+            "Transcribe de la forma más precisa y literal posible. "
             "Conserva cualquier error gramatical, de ortografía o de puntuación presente en el texto original. "
-            "NO intentes corregir ni mejorar el texto del estudiante. Tu única tarea es transcribir fielmente lo que está escrito."
+            "NO intentes corregir, traducir, ni mejorar el texto del estudiante. "
+            "Tu única tarea es transcribir fielmente lo que está escrito, en su idioma original."
         )
 
     message_content = [
@@ -92,6 +95,7 @@ async def transcribe_image_url_with_llm(image_url: str, prompt_text: str | None 
     human_message = HumanMessage(content=message_content)
     
     print(f"Enviando imagen {image_url} y prompt de transcripción al LLM...")
+    # ... (resto de la función igual que antes) ...
     try:
         ai_response = await llm.ainvoke([human_message]) 
         transcription = str(ai_response.content) if ai_response.content else ""
@@ -138,15 +142,15 @@ async def correct_text_with_llm(text_to_correct: str, student_level: str = "inte
         - Ejemplo de comentario sobre organización.
 
     *   **Gramática (Grammar):**
-        (Errores en tiempos verbales, concordancia sujeto-verbo, artículos, preposiciones, estructura de la frase, etc.)
-        - Ejemplo de comentario sobre gramática: "En la frase 'X', sería mejor decir 'Y' porque..."
+        (Errores en tiempos verbales, concordancia sujeto-verbo, artículos, preposiciones, estructura de la frase, etc. Para CADA error significativo, debes: 1. Citar la frase o parte del texto original. 2. Proporcionar la corrección directa. 3. Explicar brevemente la regla o la razón.)
+        - Original: 'He go to school.' Corrección: 'He goes to school.' Explicación: El verbo necesita la '-es' en tercera persona del singular en presente simple.
 
     *   **Vocabulario (Vocabulary):**
-        (Uso incorrecto de palabras, repetición, falta de variedad, colocaciones incorrectas, formalidad del vocabulario.)
+        (Uso incorrecto de palabras, repetición, falta de variedad, colocaciones incorrectas, formalidad del vocabulario. Cita el original, da la corrección y una breve explicación.)
         - Ejemplo de comentario sobre vocabulario: "La palabra 'Z' podría reemplazarse por 'W' para mayor precisión."
 
     *   **Puntuación y Ortografía (Punctuation & Spelling):**
-        (Errores de puntuación, mayúsculas, errores ortográficos.)
+        (Errores de puntuación, mayúsculas, errores ortográficos. Cita el original, da la corrección y una breve explicación.)
         - Ejemplo de comentario sobre puntuación.
 
     **Sugerencias Adicionales:**
@@ -155,7 +159,7 @@ async def correct_text_with_llm(text_to_correct: str, student_level: str = "inte
 
     **Nota Importante:** Sé específico en tus comentarios y proporciona ejemplos claros. El objetivo es educativo. Evita ser demasiado severo; enfócate en el aprendizaje.
     No reescribas la redacción completa. Solo proporciona ejemplos de corrección para ilustrar tus puntos.
-    Utiliza Markdown para el formato del feedback (negritas, listas).
+    Utiliza Markdown para el formato del feedback (negritas, listas). Es crucial que sigas el formato Markdown exactamente como se describe.
     """
 
     messages = [
@@ -180,7 +184,7 @@ async def correct_text_with_llm(text_to_correct: str, student_level: str = "inte
 if __name__ == "__main__":
     import asyncio
     
-    test_student_text = """
+    test_student_text_example = """
     Hello teacher, my name is John. I want tell you about my holiday.
     Last summer, I goed to the beach with my family. It were very fun.
     The sun shined and the water are blue. We swimmed and play volleyball.
@@ -190,28 +194,31 @@ if __name__ == "__main__":
     """
 
     async def main_test():
-        # --- Prueba de Transcripción (requiere una imagen real y accesible) ---
-        # test_image_url = "URL_DE_TU_IMAGEN_DE_PRUEBA_AQUI" 
-        # print(f"Probando TRANSCRIPCIÓN con el proveedor por defecto: {DEFAULT_VISION_MODEL_PROVIDER}")
-        # try:
-        #     # Usando el prompt por defecto mejorado
-        #     transcription = await transcribe_image_url_with_llm(test_image_url) 
-        #     print("\n--- Transcripción Obtenida ---")
-        #     print(transcription)
-        # except ValueError as ve:
-        #     print(f"Error de configuración (Visión): {ve}")
-        # except Exception as e:
-        #     print(f"Ocurrió un error durante la prueba de visión: {e}")
+        # --- Prueba de Transcripción ---
+        # Necesitarás una URL de imagen real y accesible para que esto funcione.
+        # test_image_url = "PON_AQUI_UNA_URL_DE_IMAGEN_MANUSCRITA_REAL" 
+        # if test_image_url and test_image_url != "PON_AQUI_UNA_URL_DE_IMAGEN_MANUSCRITA_REAL":
+        #     print(f"Probando TRANSCRIPCIÓN con el proveedor por defecto: {DEFAULT_VISION_MODEL_PROVIDER}")
+        #     try:
+        #         transcription = await transcribe_image_url_with_llm(test_image_url) 
+        #         print("\n--- Transcripción Obtenida ---")
+        #         print(transcription)
+        #     except ValueError as ve:
+        #         print(f"Error de configuración (Visión): {ve}")
+        #     except Exception as e:
+        #         print(f"Ocurrió un error durante la prueba de visión: {e}")
+        # else:
+        #     print("INFO: Prueba de transcripción omitida, no se proporcionó test_image_url.")
 
         print("\n" + "="*50 + "\n")
 
         # --- Prueba de Corrección ---
         print(f"Probando CORRECCIÓN con el proveedor por defecto: {DEFAULT_LANGUAGE_MODEL_PROVIDER}")
         try:
-            feedback = await correct_text_with_llm(test_student_text)
+            feedback = await correct_text_with_llm(test_student_text_example)
             print("\n--- Feedback de Corrección Obtenido ---")
             print(feedback)
-            print(f"\n(Versión del prompt usado: {CORRECTION_PROMPT_VERSION_CURRENT})")
+            print(f"\n(Versión del prompt de corrección usado: {CORRECTION_PROMPT_VERSION_CURRENT})")
         except ValueError as ve:
             print(f"Error de configuración (Lenguaje): {ve}")
         except Exception as e:
