@@ -1,43 +1,63 @@
 # my-english-corrector-backend/models.py
-from sqlmodel import Field, SQLModel, Relationship # Relationship para claves foráneas
-from datetime import datetime, timezone # Para created_at y updated_at
-from typing import Optional, List # Para tipos opcionales y listas en relaciones
+import os # <--- AÑADIR ESTA LÍNEA
+from sqlmodel import Field, SQLModel, Relationship
+from datetime import datetime, timezone
+from typing import Optional, List
 
 # --- Modelo de Usuario ---
-# Este modelo almacenará el ID del usuario de Supabase y sus créditos.
 class UserBase(SQLModel):
-    email: Optional[str] = Field(default=None, index=True) # Opcional, para referencia
+    email: Optional[str] = Field(default=None, index=True)
     credits: int = Field(default=0)
 
 class User(UserBase, table=True):
-    id: str = Field(default=None, primary_key=True) # ID de Supabase Auth (sub)
-
-    # Relación uno-a-muchos: Un usuario puede tener muchas redacciones (ExamPaper)
+    id: str = Field(default=None, primary_key=True)
     exam_papers: List["ExamPaper"] = Relationship(back_populates="owner")
 
-class UserCreate(UserBase): # Para crear un usuario si es necesario (ej. primera compra de créditos)
-    id: str # El ID vendrá de Supabase Auth
-
-class UserRead(UserBase): # Para leer la info del usuario
+class UserCreate(UserBase):
     id: str
 
-class UserUpdateCredits(SQLModel): # Para actualizar solo los créditos
+class UserRead(UserBase):
+    id: str
+
+class UserUpdateCredits(SQLModel):
     credits: int
 
+# --- Modelo ExamImage ---
+class ExamImageBase(SQLModel):
+    image_url: str = Field(description="URL de la imagen en el almacenamiento")
+    page_number: Optional[int] = Field(default=None, description="Número de página para ordenamiento")
+    exam_paper_id: Optional[int] = Field(default=None, foreign_key="exampaper.id", index=True)
+
+class ExamImage(ExamImageBase, table=True):
+    id: int = Field(default=None, primary_key=True)
+    exam_paper: Optional["ExamPaper"] = Relationship(back_populates="images")
+
+class ExamImageCreate(ExamImageBase):
+    pass
+
+class ExamImageRead(ExamImageBase):
+    id: int
 
 # --- Modelo de Redacción (ExamPaper) ---
 class ExamPaperBase(SQLModel):
-    filename: Optional[str] = None
-    image_url: Optional[str] = None
-    status: str = Field(default="uploaded")
+    filename: Optional[str] = Field(default=None, description="Nombre del archivo original o un título para el ensayo")
+    status: str = Field(default="uploaded", description="Estado actual del procesamiento del ensayo")
 
-    transcribed_text: Optional[str] = Field(default=None)
+    # Usar os.getenv requiere 'import os' al principio del archivo
+    transcribed_text: Optional[str] = Field(
+        default=None, 
+        sa_column_kwargs={"longtext": True} if os.getenv("DATABASE_DIALECT") == "mysql" else {}, 
+        description="Texto transcrito completo de todas las páginas"
+    )
     transcription_credits_consumed: int = Field(default=0)
     
-    # Nuevos campos para la corrección
-    corrected_feedback: Optional[str] = Field(default=None, description="Feedback de corrección proporcionado por el LLM.")
+    corrected_feedback: Optional[str] = Field(
+        default=None, 
+        sa_column_kwargs={"longtext": True} if os.getenv("DATABASE_DIALECT") == "mysql" else {}, 
+        description="Feedback de corrección proporcionado por el LLM"
+    )
     correction_credits_consumed: int = Field(default=0)
-    correction_prompt_version: Optional[str] = Field(default=None, description="Versión del prompt de corrección utilizado.")
+    correction_prompt_version: Optional[str] = Field(default=None, description="Versión del prompt de corrección utilizado")
 
     user_id: str = Field(foreign_key="user.id", index=True)
 
@@ -46,15 +66,14 @@ class ExamPaper(ExamPaperBase, table=True):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc),
                                  sa_column_kwargs={"onupdate": lambda: datetime.now(timezone.utc)})
-    
-    # Nuevo campo para la fecha de corrección
     corrected_at: Optional[datetime] = Field(default=None, description="Fecha y hora de cuando se completó la corrección.")
 
-    # Relación muchos-a-uno: Esta redacción pertenece a un "owner" (User)
     owner: Optional[User] = Relationship(back_populates="exam_papers")
+    images: List["ExamImage"] = Relationship(
+        back_populates="exam_paper",
+        sa_relationship_kwargs={'lazy': 'selectin'} 
+    )
 
-
-# Modelos Pydantic para diferentes operaciones CRUD de ExamPaper
 class ExamPaperCreate(ExamPaperBase):
     pass
 
@@ -62,23 +81,15 @@ class ExamPaperRead(ExamPaperBase):
     id: int
     created_at: datetime
     updated_at: datetime
-    corrected_at: Optional[datetime] # Incluir en la lectura
+    corrected_at: Optional[datetime]
+    images: List[ExamImageRead] = []
 
-class ExamPaperUpdate(SQLModel): # Para actualizaciones parciales
+class ExamPaperUpdate(SQLModel):
     filename: Optional[str] = None
-    image_url: Optional[str] = None
     status: Optional[str] = None
     transcribed_text: Optional[str] = None
-    transcription_credits_consumed: Optional[int] = None
-    
-    # Nuevos campos para actualización
-    corrected_feedback: Optional[str] = None
-    correction_credits_consumed: Optional[int] = None
-    correction_prompt_version: Optional[str] = None
-    corrected_at: Optional[datetime] = None
 
-
-# --- Modelo TestItem (Considera si aún lo necesitas) ---
+# --- Modelo TestItem ---
 class TestItemBase(SQLModel):
     name: str = Field(index=True)
     description: str | None = None
