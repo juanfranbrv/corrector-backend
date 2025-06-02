@@ -2,12 +2,12 @@
 import os
 import uuid
 from datetime import datetime, timezone
-from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form, status as http_status # Form para filename_prefix
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form, status as http_status 
 from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import Session, SQLModel, create_engine, select, func
 from dotenv import load_dotenv
 from urllib.parse import urlparse
-from typing import List, Optional # Para List[UploadFile] y Optional[str]
+from typing import List, Optional
 from pydantic import BaseModel
 
 from supabase import create_client, Client as SupabaseClient
@@ -36,7 +36,7 @@ else:
 
 # --- Constantes de la Aplicación ---
 MAX_UPLOAD_SIZE_BYTES = 5 * 1024 * 1024
-MAX_EXAM_PAPERS_PER_USER = 20 # Límite de ExamPapers, no de imágenes individuales
+MAX_EXAM_PAPERS_PER_USER = 20 
 TRANSCRIPTION_COST = 1
 CORRECTION_COST = 5
 EXAM_IMAGES_BUCKET = "exam-images"
@@ -94,7 +94,7 @@ async def read_users_me_with_status(
 @app.post("/exam_papers/upload_multiple_images/", response_model=models.ExamPaperRead)
 async def upload_multiple_exam_images(
     files: List[UploadFile] = File(..., description="Lista de archivos de imagen del ensayo (páginas)"),
-    # filename_prefix: Optional[str] = Form(None, description="Nombre opcional para el ensayo"), # Usar Form si se envía como campo de formulario
+    essay_title: Optional[str] = Form(None, description="Título opcional para el ensayo proporcionado por el usuario"), # <--- NUEVO PARÁMETRO
     current_auth_user: TokenPayload = Depends(get_current_user),
     session: Session = Depends(get_session)
 ):
@@ -114,19 +114,36 @@ async def upload_multiple_exam_images(
     # Crear/Obtener usuario local
     db_user = session.get(models.User, user_id)
     if not db_user:
-        new_db_user_data = models.UserCreate(id=user_id, email=user_email, credits=0)
+        # Esta lógica debería ser manejada por el trigger de base de datos ahora.
+        # Si el trigger está funcionando, db_user no debería ser None aquí para un usuario autenticado.
+        # Podríamos lanzar un error si no se encuentra, asumiendo que el trigger DEBE haberlo creado.
+        print(f"ADVERTENCIA/ERROR: Usuario {user_id} no encontrado en tabla local 'user' durante la subida. El trigger debería haberlo creado.")
+        # Por robustez, podríamos crearlo aquí como fallback, pero idealmente el trigger lo maneja.
+        new_db_user_data = models.UserCreate(id=user_id, email=user_email, credits=0) # O los créditos iniciales por defecto
         db_user = models.User.model_validate(new_db_user_data)
         session.add(db_user)
         # No hacer commit aún, se hará al final o con el paper
 
     # 1. Crear el ExamPaper
-    # Usar el nombre del primer archivo como nombre del ExamPaper, o un default
-    paper_filename = files[0].filename if files[0].filename else f"Ensayo_{uuid.uuid4().hex[:8]}"
+    # Determinar el nombre del archivo para el ExamPaper
+    paper_filename: str
+    if essay_title and essay_title.strip(): # Si el usuario proporcionó un título
+        paper_filename = essay_title.strip()
+    elif files[0].filename: # Usar el nombre del primer archivo como fallback
+        paper_filename = files[0].filename
+    else: # Generar un nombre por defecto si todo lo demás falla
+        current_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        paper_filename = f"Ensayo subido el {current_date} - {uuid.uuid4().hex[:6]}"
     
+    # Truncar si es demasiado largo (opcional, depende de la longitud máxima de tu campo 'filename')
+    MAX_FILENAME_LENGTH = 255 # Asume un límite razonable
+    if len(paper_filename) > MAX_FILENAME_LENGTH:
+        paper_filename = paper_filename[:MAX_FILENAME_LENGTH]
+
     db_exam_paper_data = models.ExamPaperCreate(filename=paper_filename, status="uploaded", user_id=user_id)
     db_exam_paper = models.ExamPaper.model_validate(db_exam_paper_data)
     session.add(db_exam_paper)
-    session.commit() # Commit para obtener el db_exam_paper.id
+    session.commit() 
     session.refresh(db_exam_paper)
 
     uploaded_image_models: List[models.ExamImage] = []
@@ -142,7 +159,6 @@ async def upload_multiple_exam_images(
             original_image_filename = file_item.filename if file_item.filename else f"page_{index + 1}"
             file_extension = original_image_filename.split(".")[-1].lower() if "." in original_image_filename else "png"
             
-            # Estructura de ruta: user_id / paper_id / page_index_uuid.ext
             unique_storage_filename = f"page_{index + 1}_{uuid.uuid4().hex[:12]}.{file_extension}"
             path_on_storage = f"{user_id}/{db_exam_paper.id}/{unique_storage_filename}"
             
@@ -154,40 +170,45 @@ async def upload_multiple_exam_images(
 
             db_exam_image_data = models.ExamImageCreate(
                 image_url=image_public_url,
-                page_number=index + 1, # Asignar número de página basado en el orden de subida
+                page_number=index + 1, 
                 exam_paper_id=db_exam_paper.id
             )
             db_exam_image = models.ExamImage.model_validate(db_exam_image_data)
             session.add(db_exam_image)
             uploaded_image_models.append(db_exam_image)
         
-        session.commit() # Guardar todas las ExamImages
-        for img_model in uploaded_image_models: # Refrescar para asegurar que estén en la sesión
+        session.commit() 
+        for img_model in uploaded_image_models: 
             session.refresh(img_model)
         
-        session.refresh(db_exam_paper) # Refrescar el paper para que la relación 'images' se popule
+        session.refresh(db_exam_paper) 
         if db_user: session.refresh(db_user)
 
-        return db_exam_paper # ExamPaperRead incluye la lista de imágenes
+        return db_exam_paper
 
     except Exception as e:
         if session.is_active: session.rollback()
-        # Lógica de limpieza si la subida de imágenes falla después de crear el ExamPaper
-        # Podrías eliminar las imágenes ya subidas a Supabase Storage aquí
-        # y el ExamPaper de la BD.
-        # Por ahora, solo rollback y error.
         print(f"Error durante la subida de múltiples imágenes: {type(e).__name__} - {e}")
-        # Intentar eliminar el ExamPaper si fue creado
         paper_to_delete_on_error = session.get(models.ExamPaper, db_exam_paper.id)
         if paper_to_delete_on_error:
+            # También deberíamos intentar eliminar las imágenes de Supabase Storage aquí si algunas se subieron
+            paths_to_delete_on_storage_error = []
+            # (Esta lógica de encontrar paths puede ser compleja si no todos los ExamImage se crearon)
+            # Por simplicidad en este ejemplo, nos enfocaremos en la BD
+            
+            # Eliminar ExamImages asociadas si existen en la BD
+            images_in_db_on_error = session.exec(select(models.ExamImage).where(models.ExamImage.exam_paper_id == db_exam_paper.id)).all()
+            for img_db in images_in_db_on_error:
+                session.delete(img_db)
+
             session.delete(paper_to_delete_on_error)
             session.commit()
-            print(f"ExamPaper ID {db_exam_paper.id} eliminado debido a error en subida de imágenes.")
+            print(f"ExamPaper ID {db_exam_paper.id} y sus imágenes asociadas eliminados de la BD debido a error en subida de imágenes.")
         raise HTTPException(status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Error interno al procesar archivos: {str(e)}")
     finally:
-        for file_item in files: # Cerrar todos los archivos
+        for file_item in files:
              if hasattr(file_item, 'close') and callable(file_item.close):
-                await file_item.close()
+                await file_item.close() # type: ignore
 
 
 @app.get("/exam_papers/", response_model=List[models.ExamPaperRead])
@@ -203,11 +224,10 @@ async def list_exam_papers_for_current_user(
         .limit(limit)
     )
     papers = session.exec(statement).all()
-    # SQLModel con lazy='selectin' debería cargar las imágenes relacionadas aquí
     return papers
 
 
-@app.delete("/exam_papers/{paper_id}", response_model=models.ExamPaperRead) # Devolver el paper eliminado
+@app.delete("/exam_papers/{paper_id}", response_model=models.ExamPaperRead)
 async def delete_exam_paper(
     paper_id: int, current_user_id: str = Depends(get_current_user_id),
     session: Session = Depends(get_session)
@@ -217,39 +237,19 @@ async def delete_exam_paper(
         raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="Redacción no encontrada.")
     if db_exam_paper.user_id != current_user_id:
         raise HTTPException(status_code=http_status.HTTP_403_FORBIDDEN, detail="No tienes permiso para eliminar.")
-
-    # Forzar la carga de la relación 'images' antes de validar y eliminar
-    # session.refresh(db_exam_paper, attribute_names=['images']) # Si no se usa lazy='selectin'
-    # Con lazy='selectin', db_exam_paper.images ya debería estar disponible.
     
-    # Crear el objeto de respuesta antes de eliminar
-    # Es importante que ExamPaperRead pueda instanciarse con las imágenes.
-    # Si lazy='selectin' está activo, esto debería funcionar bien.
-    # Si no, asegúrate de que db_exam_paper.images esté cargado.
     try:
-        # Para asegurar que las imágenes estén cargadas para el model_validate
-        # si no se usa lazy='selectin' o si hay dudas:
         images_to_delete = session.exec(select(models.ExamImage).where(models.ExamImage.exam_paper_id == paper_id)).all()
-        # Asignar manualmente para la validación si es necesario, aunque no es lo ideal.
-        # La forma más limpia es que la relación se cargue.
-        # Si la relación no se carga automáticamente, ExamPaperRead.model_validate(db_exam_paper) fallará.
-        # Si `lazy='selectin'` funciona, no necesitas la línea anterior.
-        
-        # Crear una copia de los datos para la respuesta
-        # Esto requiere que db_exam_paper.images esté populado.
-        # Si la relación no se carga, se puede hacer manualmente:
         temp_paper_dict = db_exam_paper.model_dump()
-        temp_paper_dict["images"] = [img.model_dump() for img in images_to_delete] # O db_exam_paper.images
+        temp_paper_dict["images"] = [img.model_dump() for img in images_to_delete]
         deleted_paper_data_for_response = models.ExamPaperRead.model_validate(temp_paper_dict)
-
     except Exception as e_val:
         print(f"Error validando ExamPaperRead para delete response: {e_val}")
-        # Si falla, al menos devolver el paper sin las imágenes o un mensaje genérico
-        deleted_paper_data_for_response = models.ExamPaperRead.model_validate(db_exam_paper) # Intentar sin imágenes si falla
+        deleted_paper_data_for_response = models.ExamPaperRead.model_validate(db_exam_paper)
 
     paths_on_storage_to_delete = []
     if supabase_admin_client and EXAM_IMAGES_BUCKET and SUPABASE_URL:
-        for image_obj in images_to_delete: # Usar la lista obtenida
+        for image_obj in images_to_delete: 
             if image_obj.image_url:
                 try:
                     parsed_url = urlparse(image_obj.image_url)
@@ -259,19 +259,17 @@ async def delete_exam_paper(
                 except Exception as e_parse: print(f"Error parseando URL de imagen para eliminar: {e_parse}")
     
     try:
-        # Eliminar ExamImages asociadas
-        for image_obj in images_to_delete: # Usar la lista obtenida
+        for image_obj in images_to_delete:
             session.delete(image_obj)
-        
-        session.delete(db_exam_paper) # Marcar ExamPaper para eliminar de la BD
+        session.delete(db_exam_paper)
 
         if paths_on_storage_to_delete and supabase_admin_client:
             print(f"Intentando eliminar de Supabase Storage: {paths_on_storage_to_delete}")
-            if paths_on_storage_to_delete: # Asegurar que la lista no esté vacía
+            if paths_on_storage_to_delete:
                  supabase_admin_client.storage.from_(EXAM_IMAGES_BUCKET).remove(paths_on_storage_to_delete)
                  print(f"Solicitud de eliminación enviada a Supabase Storage.")
         
-        session.commit() # Aplicar eliminación de la BD
+        session.commit()
         print(f"Redacción ID: {paper_id} y sus imágenes eliminadas de la BD.")
         return deleted_paper_data_for_response
     except Exception as e_db:
@@ -294,11 +292,7 @@ async def transcribe_exam_paper_endpoint(
     if db_exam_paper.user_id != user_id:
         raise HTTPException(status_code=http_status.HTTP_403_FORBIDDEN, detail="No tienes permiso.")
     
-    # Forzar la carga de la relación 'images' si no se usa lazy='selectin' o hay dudas
-    # session.refresh(db_exam_paper, attribute_names=['images'])
-    # Con lazy='selectin', db_exam_paper.images debería estar disponible al acceder.
-    
-    if not db_exam_paper.images:
+    if not db_exam_paper.images: # type: ignore
         raise HTTPException(status_code=http_status.HTTP_400_BAD_REQUEST, detail="La redacción no tiene imágenes asociadas para transcribir.")
 
     allowed_initial_states = ["uploaded", "error_transcription"]
@@ -306,7 +300,7 @@ async def transcribe_exam_paper_endpoint(
         raise HTTPException(status_code=http_status.HTTP_409_CONFLICT, detail=f"No se puede transcribir. Estado: {db_exam_paper.status}")
 
     db_user = session.get(models.User, user_id)
-    if not db_user:
+    if not db_user: # Esto no debería suceder si el trigger está funcionando
         raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="Usuario no encontrado.")
     if db_user.credits < TRANSCRIPTION_COST:
         raise HTTPException(status_code=http_status.HTTP_402_PAYMENT_REQUIRED, detail=f"Créditos insuficientes ({db_user.credits}/{TRANSCRIPTION_COST}).")
@@ -320,8 +314,7 @@ async def transcribe_exam_paper_endpoint(
     full_transcribed_text_parts = []
     any_page_transcription_failed = False
     
-    # Ordenar imágenes por page_number para una transcripción secuencial
-    sorted_images = sorted(db_exam_paper.images, key=lambda img: img.page_number if img.page_number is not None else float('inf'))
+    sorted_images = sorted(db_exam_paper.images, key=lambda img: img.page_number if img.page_number is not None else float('inf')) # type: ignore
 
     for index, image_obj in enumerate(sorted_images):
         page_prefix = f"--- Página {image_obj.page_number or index + 1} ---\n"
@@ -335,7 +328,6 @@ async def transcribe_exam_paper_endpoint(
                 full_transcribed_text_parts.append(page_prefix + page_transcription.strip() + page_suffix)
             else:
                 full_transcribed_text_parts.append(page_prefix + "[Transcripción vacía para esta página]" + page_suffix)
-                # Considerar si esto cuenta como fallo parcial
         except Exception as e_llm_page:
             print(f"Error al transcribir página {image_obj.page_number or index + 1}: {e_llm_page}")
             full_transcribed_text_parts.append(page_prefix + f"[ERROR EN TRANSCRIPCIÓN DE ESTA PÁGINA]" + page_suffix)
@@ -344,23 +336,21 @@ async def transcribe_exam_paper_endpoint(
     final_transcribed_text = "".join(full_transcribed_text_parts).strip()
 
     try:
-        # Refrescar por si acaso, aunque ya se hizo commit antes
         session.refresh(db_user) 
         session.refresh(db_exam_paper)
 
-        if final_transcribed_text: # Hay algo de texto, incluso si hubo errores parciales
+        if final_transcribed_text:
             db_exam_paper.transcribed_text = final_transcribed_text
             if any_page_transcription_failed:
-                db_exam_paper.status = "error_transcription" # O un nuevo estado como "transcribed_with_errors"
+                db_exam_paper.status = "error_transcription" 
                 print(f"Transcripción para paper {paper_id} completada con errores en algunas páginas.")
-                # Decidir si cobrar. Por ahora, no cobramos si hay errores.
             else:
                 db_exam_paper.status = "transcribed"
                 db_exam_paper.transcription_credits_consumed = TRANSCRIPTION_COST
                 db_user.credits -= TRANSCRIPTION_COST
                 session.add(db_user)
                 print(f"Créditos descontados (transcripción) para {user_id}. Saldo: {db_user.credits}")
-        else: # No se obtuvo ningún texto en absoluto
+        else: 
             db_exam_paper.status = "error_transcription"
             print(f"Transcripción falló completamente para paper {paper_id}. No se obtuvo texto.")
 
@@ -368,9 +358,9 @@ async def transcribe_exam_paper_endpoint(
         session.add(db_exam_paper)
         session.commit()
         session.refresh(db_exam_paper)
-        if db_user: session.refresh(db_user) # Refrescar para el saldo de créditos
+        if db_user: session.refresh(db_user)
 
-        if not final_transcribed_text and any_page_transcription_failed: # Si no hay texto Y hubo fallos
+        if not final_transcribed_text and any_page_transcription_failed:
             raise HTTPException(status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error durante la transcripción IA. No se obtuvo texto.")
         
         return db_exam_paper
@@ -378,7 +368,6 @@ async def transcribe_exam_paper_endpoint(
     except Exception as e_db_update:
         if session.is_active: session.rollback()
         print(f"Error DB post-transcripción paper {paper_id}: {e_db_update}")
-        # Intentar marcar el paper como 'error_transcription'
         try:
             paper_to_recover = session.get(models.ExamPaper, paper_id)
             if paper_to_recover and paper_to_recover.status != "error_transcription":
@@ -431,7 +420,7 @@ async def correct_exam_paper_endpoint(
         raise HTTPException(status_code=http_status.HTTP_400_BAD_REQUEST, detail="Redacción sin texto transcrito para corregir.")
 
     db_user = session.get(models.User, user_id)
-    if not db_user:
+    if not db_user: # No debería pasar con el trigger
         raise HTTPException(status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error de datos de usuario.")
     if db_user.credits < CORRECTION_COST:
         raise HTTPException(status_code=http_status.HTTP_402_PAYMENT_REQUIRED, detail=f"Créditos insuficientes ({db_user.credits}/{CORRECTION_COST}).")
@@ -478,7 +467,7 @@ async def correct_exam_paper_endpoint(
     except Exception as e_db_update:
         if session.is_active: session.rollback()
         print(f"Error DB post-corrección paper {paper_id}: {e_db_update}")
-        try: # Intentar marcar como error_correction si la actualización de BD falla
+        try: 
             paper_to_recover = session.get(models.ExamPaper, paper_id)
             if paper_to_recover and paper_to_recover.status != "error_correction":
                 paper_to_recover.status = "error_correction"
@@ -487,5 +476,3 @@ async def correct_exam_paper_endpoint(
                 session.commit()
         except Exception as e_recovery: print(f"Error adicional marcando paper {paper_id} como error_correction: {e_recovery}")
         raise HTTPException(status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error guardando resultado de corrección.")
-
-# (Endpoints de TestItem omitidos por brevedad, si ya no los usas, considera eliminarlos)
