@@ -212,7 +212,7 @@ async def delete_exam_paper(
 ):
     db_exam_paper = session.get(models.ExamPaper, paper_id)
     if not db_exam_paper:
-        raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="Redacción no encontrada.")
+        raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="Redacción NO encontrada.")
     if db_exam_paper.user_id != current_user_id:
         raise HTTPException(status_code=http_status.HTTP_403_FORBIDDEN, detail="No tienes permiso para eliminar esta redacción.")
 
