@@ -4,6 +4,12 @@ from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from langchain_google_genai import ChatGoogleGenerativeAI
+from pydantic import SecretStr
+from prompts import (
+    VISION_TRANSCRIPTION_PROMPT,
+    CORRECTION_SYSTEM_PROMPT,
+    PROMPT_VERSION
+)
 
 load_dotenv() # Asegurarse de que las variables de entorno estén cargadas
 
@@ -22,7 +28,7 @@ OPENAI_LANGUAGE_MODEL_NAME = os.getenv("OPENAI_LANGUAGE_MODEL_NAME", "gpt-4o")
 GOOGLE_LANGUAGE_MODEL_NAME = os.getenv("GOOGLE_LANGUAGE_MODEL_NAME", "gemini-1.5-pro-latest")
 
 # --- Versión del Prompt de Corrección ---
-CORRECTION_PROMPT_VERSION_CURRENT = "1.0"
+CORRECTION_PROMPT_VERSION_CURRENT = PROMPT_VERSION
 
 
 def get_vision_model_client():
@@ -40,7 +46,7 @@ def get_vision_model_client():
         if not OPENAI_API_KEY:
             raise ValueError("OPENAI_API_KEY no está configurada para el modelo de visión de OpenAI.")
         print(f"Usando modelo de visión de OpenAI: {OPENAI_VISION_MODEL_NAME}")
-        return ChatOpenAI(model=OPENAI_VISION_MODEL_NAME, openai_api_key=OPENAI_API_KEY)
+        return ChatOpenAI(model=OPENAI_VISION_MODEL_NAME, api_key=SecretStr(OPENAI_API_KEY))
     
     else:
         raise ValueError(f"Proveedor de modelo de visión no soportado: {DEFAULT_VISION_MODEL_PROVIDER}")
@@ -62,7 +68,7 @@ def get_language_model_client():
         if not OPENAI_API_KEY:
             raise ValueError("OPENAI_API_KEY no está configurada para el modelo de lenguaje de OpenAI.")
         print(f"Usando modelo de lenguaje de OpenAI: {OPENAI_LANGUAGE_MODEL_NAME}")
-        return ChatOpenAI(model=OPENAI_LANGUAGE_MODEL_NAME, openai_api_key=OPENAI_API_KEY,
+        return ChatOpenAI(model=OPENAI_LANGUAGE_MODEL_NAME, api_key=SecretStr(OPENAI_API_KEY),
                           temperature=0.3, top_p=0.9)
     
     else:
@@ -79,14 +85,7 @@ async def transcribe_image_url_with_llm(image_url: str, prompt_text: str | None 
     llm = get_vision_model_client()
 
     if prompt_text is None:
-        prompt_text = (
-            "Transcribe el texto manuscrito visible en esta imagen. "
-            "**La transcripción debe estar en el mismo idioma que el texto original en la imagen (se asume que es inglés).** "
-            "Transcribe de la forma más precisa y literal posible. "
-            "Conserva cualquier error gramatical, de ortografía o de puntuación presente en el texto original. "
-            "NO intentes corregir, traducir, ni mejorar el texto del estudiante. "
-            "Tu única tarea es transcribir fielmente lo que está escrito, en su idioma original."
-        )
+        prompt_text = VISION_TRANSCRIPTION_PROMPT
 
     message_content = [
         {"type": "text", "text": prompt_text},
@@ -112,58 +111,8 @@ async def correct_text_with_llm(text_to_correct: str, student_level: str = "inte
     """
     llm = get_language_model_client()
     
-    system_prompt_for_correction = """
-    Eres un profesor de inglés experto, paciente y alentador, especializado en corregir redacciones de estudiantes.
-    Tu objetivo es ayudar al estudiante a mejorar sus habilidades de escritura en inglés.
-    Revisa la redacción que te proporcionará el usuario.
-    Debes proporcionar un feedback estructurado y constructivo. Sigue este formato EXACTO:
-
-    **Feedback General:**
-    (Un breve resumen de tu impresión general sobre la redacción. Comienza con algo positivo si es posible.)
-
-    **Puntos Fuertes:**
-    (Enumera 2-3 aspectos positivos de la redacción. Ej: buen uso de vocabulario específico, ideas bien organizadas, argumento claro, etc.)
-    - Ejemplo punto fuerte 1
-    - Ejemplo punto fuerte 2
-
-    **Áreas de Mejora:**
-    (Esta es la sección principal. Identifica errores y áreas para mejorar. Para cada punto, explica el error brevemente y sugiere cómo corregirlo o mejorarlo. Si es posible, cita una pequeña parte del texto del estudiante y muestra la corrección.)
-
-    *   **Contenido y Relevancia (Content & Relevance):**
-        (¿Las ideas son relevantes para el tema? ¿Están bien desarrolladas? ¿Hay suficiente información o ejemplos?)
-        - Ejemplo de comentario sobre contenido.
-
-    *   **Logro Comunicativo y Tono (Communicative Achievement & Tone):**
-        (¿La redacción cumple su propósito? ¿El tono es apropiado para la tarea y la audiencia prevista? ¿El mensaje es claro?)
-        - Ejemplo de comentario sobre logro comunicativo.
-
-    *   **Organización y Cohesión (Organisation & Cohesion):**
-        (¿La redacción está bien estructurada? ¿Los párrafos están bien definidos y enlazados? ¿Se usan conectores de forma efectiva?)
-        - Ejemplo de comentario sobre organización.
-
-    *   **Gramática (Grammar):**
-        (Errores en tiempos verbales, concordancia sujeto-verbo, artículos, preposiciones, estructura de la frase, etc. Para CADA error significativo, debes: 1. Citar la frase o parte del texto original. 2. Proporcionar la corrección directa. 3. Explicar brevemente la regla o la razón.)
-        - Original: 'He go to school.' Corrección: 'He goes to school.' Explicación: El verbo necesita la '-es' en tercera persona del singular en presente simple.
-
-    *   **Vocabulario (Vocabulary):**
-        (Uso incorrecto de palabras, repetición, falta de variedad, colocaciones incorrectas, formalidad del vocabulario. Cita el original, da la corrección y una breve explicación.)
-        - Ejemplo de comentario sobre vocabulario: "La palabra 'Z' podría reemplazarse por 'W' para mayor precisión."
-
-    *   **Puntuación y Ortografía (Punctuation & Spelling):**
-        (Errores de puntuación, mayúsculas, errores ortográficos. Cita el original, da la corrección y una breve explicación.)
-        - Ejemplo de comentario sobre puntuación.
-
-    **Sugerencias Adicionales:**
-    (Cualquier otro consejo útil, como recursos para estudiar, áreas específicas en las que centrarse para la próxima vez, etc.)
-    - Ejemplo de sugerencia adicional.
-
-    **Nota Importante:** Sé específico en tus comentarios y proporciona ejemplos claros. El objetivo es educativo. Evita ser demasiado severo; enfócate en el aprendizaje.
-    No reescribas la redacción completa. Solo proporciona ejemplos de corrección para ilustrar tus puntos.
-    Utiliza Markdown para el formato del feedback (negritas, listas). Es crucial que sigas el formato Markdown exactamente como se describe.
-    """
-
     messages = [
-        SystemMessage(content=system_prompt_for_correction.strip()),
+        SystemMessage(content=CORRECTION_SYSTEM_PROMPT.strip()),
         HumanMessage(content=text_to_correct)
     ]
     

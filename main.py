@@ -182,12 +182,14 @@ async def upload_multiple_exam_images(
             session.refresh(img_model)
         
         session.refresh(db_exam_paper) 
-        if db_user: session.refresh(db_user)
+        if db_user:
+            session.refresh(db_user)
 
         return db_exam_paper
 
     except Exception as e:
-        if session.is_active: session.rollback()
+        if session.is_active:
+            session.rollback()
         print(f"Error durante la subida de múltiples imágenes: {type(e).__name__} - {e}")
         paper_to_delete_on_error = session.get(models.ExamPaper, db_exam_paper.id)
         if paper_to_delete_on_error:
@@ -219,12 +221,26 @@ async def list_exam_papers_for_current_user(
     statement = (
         select(models.ExamPaper)
         .where(models.ExamPaper.user_id == user_id)
-        .order_by(models.ExamPaper.created_at.desc())
+        .order_by(getattr(models.ExamPaper, 'created_at'))
         .offset(skip)
         .limit(limit)
     )
     papers = session.exec(statement).all()
     return papers
+
+
+@app.get("/exam_papers/{paper_id}", response_model=models.ExamPaperRead)
+async def get_exam_paper(
+    paper_id: int,
+    current_user_id: str = Depends(get_current_user_id),
+    session: Session = Depends(get_session)
+):
+    db_exam_paper = session.get(models.ExamPaper, paper_id)
+    if not db_exam_paper:
+        raise HTTPException(status_code=404, detail="Redacción no encontrada.")
+    if db_exam_paper.user_id != current_user_id:
+        raise HTTPException(status_code=403, detail="No tienes permiso para ver esta redacción.")
+    return db_exam_paper
 
 
 @app.delete("/exam_papers/{paper_id}", response_model=models.ExamPaperRead)
@@ -256,7 +272,8 @@ async def delete_exam_paper(
                     prefix_to_remove = f"/storage/v1/object/public/{EXAM_IMAGES_BUCKET}/"
                     if parsed_url.path.startswith(prefix_to_remove):
                         paths_on_storage_to_delete.append(parsed_url.path[len(prefix_to_remove):])
-                except Exception as e_parse: print(f"Error parseando URL de imagen para eliminar: {e_parse}")
+                except Exception as e_parse:
+                    print(f"Error parseando URL de imagen para eliminar: {e_parse}")
     
     try:
         for image_obj in images_to_delete:
@@ -267,13 +284,14 @@ async def delete_exam_paper(
             print(f"Intentando eliminar de Supabase Storage: {paths_on_storage_to_delete}")
             if paths_on_storage_to_delete:
                  supabase_admin_client.storage.from_(EXAM_IMAGES_BUCKET).remove(paths_on_storage_to_delete)
-                 print(f"Solicitud de eliminación enviada a Supabase Storage.")
+                 print("Solicitud de eliminación enviada a Supabase Storage.")
         
         session.commit()
         print(f"Redacción ID: {paper_id} y sus imágenes eliminadas de la BD.")
         return deleted_paper_data_for_response
     except Exception as e_db:
-        if session.is_active: session.rollback()
+        if session.is_active:
+            session.rollback()
         print(f"Error al eliminar la redacción ID: {paper_id} de la BD: {e_db}")
         raise HTTPException(status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error al eliminar la redacción.")
 
@@ -330,7 +348,7 @@ async def transcribe_exam_paper_endpoint(
                 full_transcribed_text_parts.append(page_prefix + "[Transcripción vacía para esta página]" + page_suffix)
         except Exception as e_llm_page:
             print(f"Error al transcribir página {image_obj.page_number or index + 1}: {e_llm_page}")
-            full_transcribed_text_parts.append(page_prefix + f"[ERROR EN TRANSCRIPCIÓN DE ESTA PÁGINA]" + page_suffix)
+            full_transcribed_text_parts.append(page_prefix + "[ERROR EN TRANSCRIPCIÓN DE ESTA PÁGINA]" + page_suffix)
             any_page_transcription_failed = True
 
     final_transcribed_text = "".join(full_transcribed_text_parts).strip()
@@ -358,7 +376,8 @@ async def transcribe_exam_paper_endpoint(
         session.add(db_exam_paper)
         session.commit()
         session.refresh(db_exam_paper)
-        if db_user: session.refresh(db_user)
+        if db_user:
+            session.refresh(db_user)
 
         if not final_transcribed_text and any_page_transcription_failed:
             raise HTTPException(status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error durante la transcripción IA. No se obtuvo texto.")
@@ -366,7 +385,8 @@ async def transcribe_exam_paper_endpoint(
         return db_exam_paper
         
     except Exception as e_db_update:
-        if session.is_active: session.rollback()
+        if session.is_active:
+            session.rollback()
         print(f"Error DB post-transcripción paper {paper_id}: {e_db_update}")
         try:
             paper_to_recover = session.get(models.ExamPaper, paper_id)
@@ -375,7 +395,8 @@ async def transcribe_exam_paper_endpoint(
                 paper_to_recover.updated_at = datetime.now(timezone.utc)
                 session.add(paper_to_recover)
                 session.commit()
-        except Exception as e_recovery: print(f"Error adicional marcando paper {paper_id} como error: {e_recovery}")
+        except Exception as e_recovery:
+            print(f"Error adicional marcando paper {paper_id} como error: {e_recovery}")
         raise HTTPException(status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error guardando resultado de transcripción.")
 
 
@@ -460,12 +481,14 @@ async def correct_exam_paper_endpoint(
         session.add(db_exam_paper)
         session.commit()
         session.refresh(db_exam_paper)
-        if db_user: session.refresh(db_user)
+        if db_user:
+            session.refresh(db_user)
         if not correction_successful:
             raise HTTPException(status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error durante corrección IA.")
         return db_exam_paper
     except Exception as e_db_update:
-        if session.is_active: session.rollback()
+        if session.is_active:
+            session.rollback()
         print(f"Error DB post-corrección paper {paper_id}: {e_db_update}")
         try: 
             paper_to_recover = session.get(models.ExamPaper, paper_id)
@@ -474,5 +497,6 @@ async def correct_exam_paper_endpoint(
                 paper_to_recover.updated_at = datetime.now(timezone.utc)
                 session.add(paper_to_recover)
                 session.commit()
-        except Exception as e_recovery: print(f"Error adicional marcando paper {paper_id} como error_correction: {e_recovery}")
+        except Exception as e_recovery:
+            print(f"Error adicional marcando paper {paper_id} como error_correction: {e_recovery}")
         raise HTTPException(status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error guardando resultado de corrección.")
