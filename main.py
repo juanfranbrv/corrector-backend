@@ -2,7 +2,7 @@
 import os
 import uuid
 from datetime import datetime, timezone
-from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form, status as http_status 
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form, status as http_status, Body
 from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import Session, SQLModel, create_engine, select, func
 from dotenv import load_dotenv
@@ -71,6 +71,12 @@ class UserStatusResponse(TokenPayload):
 
 class TranscribedTextUpdate(BaseModel):
     transcribed_text: str
+
+class FilenameUpdate(BaseModel):
+    filename: str
+
+class ImagesOrderUpdate(BaseModel):
+    image_ids: List[int]
 
 @app.get("/")
 async def read_root():
@@ -500,3 +506,127 @@ async def correct_exam_paper_endpoint(
         except Exception as e_recovery:
             print(f"Error adicional marcando paper {paper_id} como error_correction: {e_recovery}")
         raise HTTPException(status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error guardando resultado de corrección.")
+
+@app.put("/exam_papers/{paper_id}/filename", response_model=models.ExamPaperRead)
+async def update_exam_paper_filename(
+    paper_id: int,
+    update_data: FilenameUpdate,
+    current_user_id: str = Depends(get_current_user_id),
+    session: Session = Depends(get_session)
+):
+    db_exam_paper = session.get(models.ExamPaper, paper_id)
+    if not db_exam_paper:
+        raise HTTPException(status_code=404, detail=f"Redacción ID {paper_id} no encontrada.")
+    if db_exam_paper.user_id != current_user_id:
+        raise HTTPException(status_code=403, detail="No tienes permiso para modificar esta redacción.")
+    new_filename = update_data.filename.strip()
+    if not new_filename:
+        raise HTTPException(status_code=400, detail="El título no puede estar vacío.")
+    MAX_FILENAME_LENGTH = 255
+    if len(new_filename) > MAX_FILENAME_LENGTH:
+        new_filename = new_filename[:MAX_FILENAME_LENGTH]
+    db_exam_paper.filename = new_filename
+    db_exam_paper.updated_at = datetime.now(timezone.utc)
+    session.add(db_exam_paper)
+    session.commit()
+    session.refresh(db_exam_paper)
+    return db_exam_paper
+
+@app.post("/exam_papers/{paper_id}/add_images", response_model=models.ExamPaperRead)
+async def add_images_to_exam_paper(
+    paper_id: int,
+    files: List[UploadFile] = File(..., description="Nuevas imágenes para añadir al ensayo"),
+    current_user_id: str = Depends(get_current_user_id),
+    session: Session = Depends(get_session)
+):
+    db_exam_paper = session.get(models.ExamPaper, paper_id)
+    if not db_exam_paper:
+        raise HTTPException(status_code=404, detail="Redacción no encontrada.")
+    if db_exam_paper.user_id != current_user_id:
+        raise HTTPException(status_code=403, detail="No tienes permiso.")
+    # Lógica para añadir imágenes (similar a upload_multiple_exam_images, pero sin crear el paper)
+    from uuid import uuid4
+    uploaded_image_models = []
+    for index, file_item in enumerate(files):
+        if not file_item.content_type or not file_item.content_type.startswith("image/"):
+            raise HTTPException(status_code=400, detail=f"Archivo '{file_item.filename}' no es una imagen válida.")
+        contents = await file_item.read()
+        if len(contents) > MAX_UPLOAD_SIZE_BYTES:
+            raise HTTPException(status_code=413, detail=f"Archivo '{file_item.filename}' demasiado grande.")
+        file_extension = file_item.filename.split(".")[-1].lower() if file_item.filename and "." in file_item.filename else "png"
+        unique_storage_filename = f"page_{len(db_exam_paper.images)+index+1}_{uuid4().hex[:12]}.{file_extension}"
+        path_on_storage = f"{db_exam_paper.user_id}/{db_exam_paper.id}/{unique_storage_filename}"
+        if not supabase_admin_client:
+            raise HTTPException(status_code=503, detail="Storage no configurado.")
+        supabase_admin_client.storage.from_(EXAM_IMAGES_BUCKET).upload(
+            path=path_on_storage, file=contents, file_options={"content-type": file_item.content_type, "cache-control": "3600"}
+        )
+        image_public_url = f"{SUPABASE_URL}/storage/v1/object/public/{EXAM_IMAGES_BUCKET}/{path_on_storage}"
+        db_exam_image_data = models.ExamImageCreate(
+            image_url=image_public_url,
+            page_number=None,  # Se reordenará después
+            exam_paper_id=db_exam_paper.id
+        )
+        db_exam_image = models.ExamImage.model_validate(db_exam_image_data)
+        session.add(db_exam_image)
+        uploaded_image_models.append(db_exam_image)
+    session.commit()
+    # Recalcular page_number para todas las imágenes
+    all_images = session.exec(select(models.ExamImage).where(models.ExamImage.exam_paper_id == db_exam_paper.id)).all()
+    for idx, img in enumerate(sorted(all_images, key=lambda x: x.page_number if x.page_number is not None else 9999)):
+        img.page_number = idx + 1
+        session.add(img)
+    session.commit()
+    session.refresh(db_exam_paper)
+    return db_exam_paper
+
+@app.delete("/exam_images/{image_id}", response_model=models.ExamPaperRead)
+async def delete_exam_image(
+    image_id: int,
+    current_user_id: str = Depends(get_current_user_id),
+    session: Session = Depends(get_session)
+):
+    db_exam_image = session.get(models.ExamImage, image_id)
+    if not db_exam_image:
+        raise HTTPException(status_code=404, detail="Imagen no encontrada.")
+    db_exam_paper = session.get(models.ExamPaper, db_exam_image.exam_paper_id)
+    if not db_exam_paper or db_exam_paper.user_id != current_user_id:
+        raise HTTPException(status_code=403, detail="No tienes permiso.")
+    # Eliminar de storage si es posible
+    if supabase_admin_client and db_exam_image.image_url:
+        from urllib.parse import urlparse
+        parsed = urlparse(db_exam_image.image_url)
+        path = parsed.path.split(f"/{EXAM_IMAGES_BUCKET}/")[-1]
+        supabase_admin_client.storage.from_(EXAM_IMAGES_BUCKET).remove([path])
+    session.delete(db_exam_image)
+    session.commit()
+    # Recalcular page_number
+    all_images = session.exec(select(models.ExamImage).where(models.ExamImage.exam_paper_id == db_exam_paper.id)).all()
+    for idx, img in enumerate(sorted(all_images, key=lambda x: x.page_number if x.page_number is not None else 9999)):
+        img.page_number = idx + 1
+        session.add(img)
+    session.commit()
+    session.refresh(db_exam_paper)
+    return db_exam_paper
+
+@app.put("/exam_papers/{paper_id}/reorder_images", response_model=models.ExamPaperRead)
+async def reorder_exam_images(
+    paper_id: int,
+    order_update: ImagesOrderUpdate = Body(...),
+    current_user_id: str = Depends(get_current_user_id),
+    session: Session = Depends(get_session)
+):
+    db_exam_paper = session.get(models.ExamPaper, paper_id)
+    if not db_exam_paper or db_exam_paper.user_id != current_user_id:
+        raise HTTPException(status_code=403, detail="No tienes permiso.")
+    images = session.exec(select(models.ExamImage).where(models.ExamImage.exam_paper_id == paper_id)).all()
+    id_to_img = {img.id: img for img in images}
+    if set(order_update.image_ids) != set(id_to_img.keys()):
+        raise HTTPException(status_code=400, detail="IDs de imágenes no coinciden con las del ensayo.")
+    for idx, img_id in enumerate(order_update.image_ids):
+        img = id_to_img[img_id]
+        img.page_number = idx + 1
+        session.add(img)
+    session.commit()
+    session.refresh(db_exam_paper)
+    return db_exam_paper
